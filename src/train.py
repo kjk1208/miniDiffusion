@@ -66,7 +66,7 @@ def train(device: Optional[str], train_dataset: Optional[str], epochs: int = 3, 
         noised_image = torch.stack([sample[1] for sample in batch]).squeeze(1) 
         added_noise = torch.stack([sample[2] for sample in batch]).squeeze(1)
         timesteps = torch.stack([sample[3] for sample in batch]).squeeze(1)
-        timesteps = torch.stack([sample[4] for sample in batch]).squeeze(1)
+        label = torch.stack([sample[4] for sample in batch]).squeeze(1)
 
         return (
             latent, 

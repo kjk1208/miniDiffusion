@@ -3,6 +3,8 @@ import torch.nn as nn
 from collections import deque
 import torch.nn.functional as F
 from model.dit_components import RMSNorm
+import matplotlib.pyplot as plt
+import os
 
 # TODO: REVIST THE PAGIN LOGIC
 class PagedJointAttention(nn.Module):
@@ -163,19 +165,71 @@ class PagedJointAttention(nn.Module):
         self.v_cache.clear()
 
     def __del__(self):
-        super()
-        self.reset_cache()
+        try:
+            self.reset_cache()
+        except AttributeError:
+            pass
+
+    def compute_attention_weights(self, Q, K):
+        """
+        Q, K: (B, heads, T, head_dim)
+        Return: attention weights (B, heads, T, T')
+        """
+        scale = Q.shape[-1] ** -0.5
+        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) * scale
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        return attn_weights
 
 
-def test_atten(embed_dim = 512):
+def test_atten(embedding_size = 512):
     
-    x = torch.rand(77, embed_dim)
+    x = torch.rand(77, embedding_size)
 
-    attention = PagedJointAttention(embed_dim = embed_dim, num_heads = 8)
+    attention = PagedJointAttention(embedding_size = embedding_size, heads = 8)
     output = attention(x.unsqueeze(0))
 
     print(output)
-    del model
+    del attention
+
+def test_atten_with_visualization(embedding_size=512, save_dir="attention_vis"):
+    B, T, H = 1, 16, 8
+    attention = PagedJointAttention(embedding_size=embedding_size, heads=H)
+
+    x = torch.rand(B, T, embedding_size)
+    q = attention.to_q(x).view(B, T, H, -1).transpose(1, 2)
+    k = attention.to_k(x).view(B, T, H, -1).transpose(1, 2)
+    v = attention.to_v(x).view(B, T, H, -1).transpose(1, 2)
+
+    # attention weight 계산
+    attn_weights = attention.compute_attention_weights(q, k)  # [B, heads, T, T]
+    attn_output = torch.matmul(attn_weights, v)               # [B, heads, T, D]
+    output = attn_output.transpose(1, 2).reshape(B, T, embedding_size)
+
+    # 출력
+    print("Output shape:", output.shape)
+    print("Attention weights shape:", attn_weights.shape)
+
+    # 저장 디렉토리 생성
+    os.makedirs(save_dir, exist_ok=True)
+
+    # 첫 번째 head의 attention map 저장
+    head_idx = 0
+    attn_map = attn_weights[0, head_idx].detach().cpu().numpy()
+
+    plt.figure(figsize=(6, 5))
+    plt.imshow(attn_map, cmap='viridis')
+    plt.title(f"Attention Map - Head {head_idx}")
+    plt.xlabel("Key Position")
+    plt.ylabel("Query Position")
+    plt.colorbar()
+    plt.tight_layout()
+
+    save_path = os.path.join(save_dir, f"attention_map_head{head_idx}.png")
+    plt.savefig(save_path)
+    plt.close()
+
+    print(f"[Saved] attention map saved to {save_path}")
 
 if __name__ == "__main__":
-    test_atten()
+    #test_atten()
+    test_atten_with_visualization()

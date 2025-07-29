@@ -7,6 +7,9 @@ from diffusers import SD3Transformer2DModel
 import torch
 import os
 
+
+token = os.environ["HUGGINGFACE_TOKEN"]
+
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
 def get_path(name: str):
@@ -30,7 +33,7 @@ diff_repo = "stabilityai/stable-diffusion-3.5-medium"
 diff_filename = get_path("sd3")
 
 if not os.path.exists(vae_cache):
-    pipe = StableDiffusion3Pipeline.from_pretrained(diff_repo, token = "", torch_dtype = torch.bfloat16)
+    pipe = StableDiffusion3Pipeline.from_pretrained(diff_repo, token = token, torch_dtype = torch.bfloat16)
     vae_weights_path = pipe.vae.state_dict()
 
     torch.save(vae_weights_path, get_path("vae.pth"))
@@ -39,7 +42,7 @@ if not os.path.exists(diff_filename):
 
     model = SD3Transformer2DModel.from_pretrained(
         diff_repo,  subfolder="transformer",
-        token = "",
+        token = token,
         torch_dtype = torch.bfloat16
     )
     torch.save(model.to(torch.bfloat16).state_dict(), get_path("sd3_diff.pth"))
@@ -56,7 +59,7 @@ if not os.path.exists(clip_cache):
 # must add token = "[TOKEN]" here
 if not os.path.exists(clip_2_cache):
     clip_model = CLIPTextModelWithProjection.from_pretrained(clip_2_repo, cache_dir = clip_2_cache, torch_dtype = torch.bfloat16,
-                                                         token = "")
+                                                         token = token)
     clip_model_state_dict = clip_model.state_dict()
 
     torch.save(clip_model_state_dict,  get_path("clip2.pth"))
