@@ -4,3 +4,5 @@ torchvision
 matplotlib
 pillow
 sentencepiece
+transformers
+diffusers
