@@ -6,3 +6,5 @@ pillow
 sentencepiece
 transformers
 diffusers
+protobuf
+accelerate

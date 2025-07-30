@@ -202,7 +202,7 @@ class UnigramTokenizer: # For T5 Encoder
     def __init__(self, max_length: int = 77):
 
         # get from encoders/get_checkpoints.py
-        tokenizer_json_path = os.path.join(os.getcwd(), "encoders", "hub", "checkpoints", "t5_tokenizer", "spiece.model")
+        tokenizer_json_path = os.path.join(os.getcwd(), "encoders", "hub", "checkpoints", "t5", "spiece.model")
 
         self.spm_model = spm.SentencePieceProcessor()
         self.spm_model.Load(tokenizer_json_path)

@@ -51,6 +51,9 @@ class ImageDataset(IterableDataset):
 
         self.batch_size = batch
         self.max_samples = max_samples
+    
+    def __len__(self):
+        return self.max_samples
 
     def __iter__(self):
         # in the forward pass of the model
@@ -99,11 +102,15 @@ class ImageDataset(IterableDataset):
             except Exception as e:
                 print("(-) Error: ", e)
 
-def check_dataset_dir(type: str):
-    # check if the dir of dataset is valid
-    path = os.path.join(os.getcwd(), type)
-    assert os.path.exists(path), "{type} should exist in working directory miniDiffusion or should be passed as a parameter"
+# def check_dataset_dir(type: str):
+#     # check if the dir of dataset is valid
+#     path = os.path.join(os.getcwd(), type)
+#     assert os.path.exists(path), "{type} should exist in working directory miniDiffusion or should be passed as a parameter"
     
+#     return True
+
+def check_dataset_dir(path: str):
+    assert os.path.exists(path), f"Dataset path '{path}' does not exist."
     return True
 
 def get_dataloader(dataset, device: str = "cpu") -> DataLoader:

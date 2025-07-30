@@ -3,3 +3,4 @@ pytorch_vision_v0.10.0
 trusted_list
 hub
 model/checkpoint.pth
+/model/

@@ -11,9 +11,14 @@ import os
 token = os.environ["HUGGINGFACE_TOKEN"]
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "60"
 
 def get_path(name: str):
     return os.path.join(os.getcwd(), "encoders", "hub", "checkpoints", name)
+
+def ensure_checkpoint_dir():
+    checkpoint_dir = get_path("")  # 즉, encoders/hub/checkpoints/
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
 vae_cache = get_path("vae")
 
@@ -33,6 +38,7 @@ diff_repo = "stabilityai/stable-diffusion-3.5-medium"
 diff_filename = get_path("sd3")
 
 if not os.path.exists(vae_cache):
+    ensure_checkpoint_dir()
     pipe = StableDiffusion3Pipeline.from_pretrained(diff_repo, token = token, torch_dtype = torch.bfloat16)
     vae_weights_path = pipe.vae.state_dict()
 
