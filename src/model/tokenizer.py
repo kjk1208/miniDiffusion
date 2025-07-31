@@ -153,33 +153,57 @@ class TorchTokenizer: # Byte-Level Byte-Pair Tokenizer
 
         return word
 
-    def tokenize(self, text):
-        """Tokenizes text by splitting on whitespace and maps to vocab."""  
+    # def tokenize(self, text):
+    #     """Tokenizes text by splitting on whitespace and maps to vocab."""  
 
-        # normalize
+    #     # normalize
+    #     text = text.lower()
+
+    #     token_ids = []
+    #     # use re to split text on whitespace and only get useful data
+    #     for token in re.findall(self.pattern, text):
+    #         # turn data to utf-8 bytes
+    #         token = "".join(
+    #             self.byte_encoder[t] for t in token.encode("utf-8")
+    #         )
+
+    #         bpe_tokens = self.bpe_tokenize(token).split(" ")
+
+    #         for sub in bpe_tokens:
+    #             token_ids.append(self.vocab.get(sub, self.unk_token))
+
+    #     # add start and end tokens
+    #     token_ids = [self.start] + token_ids + [self.end]
+
+    #     # truncate
+    #     if len(token_ids) < self.max_length:
+    #         token_ids = token_ids[:self.max_length]
+
+    #     return torch.tensor(token_ids, dtype = torch.long)
+    
+    def tokenize(self, text):
+        """Tokenizes text by splitting on whitespace and maps to vocab."""
+
+        if isinstance(text, list):
+            return [self.tokenize(t) for t in text]  # 재귀적으로 호출
+        elif not isinstance(text, str):
+            raise ValueError(f"Expected string or list of strings, got {type(text)}")
+
         text = text.lower()
 
         token_ids = []
-        # use re to split text on whitespace and only get useful data
         for token in re.findall(self.pattern, text):
-            # turn data to utf-8 bytes
-            token = "".join(
-                self.byte_encoder[t] for t in token.encode("utf-8")
-            )
-
+            token = "".join(self.byte_encoder[t] for t in token.encode("utf-8"))
             bpe_tokens = self.bpe_tokenize(token).split(" ")
 
             for sub in bpe_tokens:
                 token_ids.append(self.vocab.get(sub, self.unk_token))
 
-        # add start and end tokens
         token_ids = [self.start] + token_ids + [self.end]
-
-        # truncate
         if len(token_ids) < self.max_length:
             token_ids = token_ids[:self.max_length]
 
-        return torch.tensor(token_ids, dtype = torch.long)
+        return torch.tensor(token_ids, dtype=torch.long)
     
     def tokenize_batch(self, texts):
 
@@ -219,19 +243,31 @@ class UnigramTokenizer: # For T5 Encoder
     # convert a char piece to an integer
     def _piece_to_id(self, piece: str) -> int:
         return self.spm_model.piece_to_id(piece)
-        
-    def encode(self, text: str):
-        """ Searches for the best way of splitting text by maximizing their probabilities """
+    
+    
+    def encode(self, text):
+        if isinstance(text, list):
+            return [self.encode(t) for t in text]
+        elif not isinstance(text, str):
+            raise ValueError(f"Expected string or list of strings, got {type(text)}")
 
-        # replace spaces with SentencePiece's underline
-        tokens = self.spm_model.encode(text, out_type = str)
-
+        tokens = self.spm_model.encode(text, out_type=str)
         tokens = tokens + [self.eos_token]
-
         if len(tokens) > self.max_length:
             tokens = tokens[: self.max_length]
+        return tokens    
+    # def encode(self, text: str):
+    #     """ Searches for the best way of splitting text by maximizing their probabilities """
+
+    #     # replace spaces with SentencePiece's underline
+    #     tokens = self.spm_model.encode(text, out_type = str)
+
+    #     tokens = tokens + [self.eos_token]
+
+    #     if len(tokens) > self.max_length:
+    #         tokens = tokens[: self.max_length]
         
-        return tokens
+    #     return tokens
     
     def encode_ids(self, text):
         tokens = self.encode(text)

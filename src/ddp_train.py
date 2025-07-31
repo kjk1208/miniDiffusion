@@ -43,22 +43,28 @@ def stack_tensors(batch):
     noised_image = torch.stack([sample[1] for sample in batch]).squeeze(1)
     added_noise = torch.stack([sample[2] for sample in batch]).squeeze(1)
     timesteps = torch.stack([sample[3] for sample in batch]).squeeze(1)
-    label = torch.stack([sample[4] for sample in batch]).squeeze(1)
-    return latent, noised_image, added_noise, timesteps, label
+    label_raw = [sample[4] for sample in batch]
+    sigma = torch.stack([sample[5] for sample in batch]).squeeze(1)
+
+    assert all(isinstance(l, (str, tuple)) for l in label_raw), \
+        f"Unexpected label format: {[type(l) for l in label_raw]}"
+
+    labels = [l[0] if isinstance(l, tuple) else l for l in label_raw]
+    return latent, noised_image, added_noise, timesteps, labels, sigma
 
 def evaluate(model, dataloader, clip, clip_2, t5_encoder, prompt_handler, device):
     model.eval()
     total_loss = 0
     with torch.no_grad():
         for batch in dataloader:
-            latent, noised_image, added_noise, timesteps, label = stack_tensors(batch)
-            embeddings, pooled_embeddings = prompt_handler(label, clip=clip, clip_2=clip_2, t5_encoder=t5_encoder)
+            latent, noised_image, added_noise, timesteps, labels, sigma = stack_tensors(batch)
+            embeddings, pooled_embeddings = prompt_handler(labels, clip=clip, clip_2=clip_2, t5_encoder=t5_encoder)
             target = added_noise - noised_image
             drift = model(latent=latent,
                           timestep=timesteps,
                           encoder_hidden_states=embeddings,
                           pooled_projections=pooled_embeddings)
-            loss = loss_fn(drift, target)
+            loss = loss_fn(drift, target, sigma)
             total_loss += loss.item()
     return total_loss / len(dataloader)
 
@@ -72,12 +78,13 @@ def train(args):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = os.path.join("model", timestamp) if is_main else None
     checkpoint_dir = os.path.join(log_dir, "checkpoints") if is_main else None
-    if is_main:
-        os.makedirs(checkpoint_dir, exist_ok=True)
+    
 
     device = f"cuda:{rank}"
     model = DiT().to(device)
     model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+    
+    #print(f"[RANK {rank}] [DEBUG] model.module type = {type(model.module)}", flush=True)
 
     torch.set_default_dtype(torch.bfloat16)
     torch.manual_seed(2025)
@@ -86,8 +93,22 @@ def train(args):
     scheduler = LambdaLR(optimizer, lambda step: step / 100.0 if step < 100 else 1.0)
 
     vae = load_vae(model=VAE(), device=device)
-    clip = load_clip(model=CLIP(), model_2=OpenCLIP(), device=device)
+    vae = vae.to(device)
+    clip_1, clip_2 = load_clip(model=CLIP(), model_2=OpenCLIP(), device=device)
+    clip_1 = clip_1.to(device)
+    clip_2 = clip_2.to(device)
     t5_encoder = load_t5(model=T5EncoderModel(), device=device)
+    t5_encoder = t5_encoder.to(device)
+    
+    clip_1.eval()
+    clip_2.eval()
+    t5_encoder.eval()
+    vae.eval()
+    
+    for frozen_model in [clip_1, clip_2, t5_encoder]:
+        for param in model.parameters():
+            param.requires_grad = False
+    
     prompt_handler = HandlePrompt()
 
     if not args.train_dataset:
@@ -96,38 +117,65 @@ def train(args):
         train_dataset = get_dataset(args.train_dataset, batch_size=args.batch_size, device=device)
         val_loader = get_dataset(args.val_dataset, batch_size=args.batch_size, device=device) if args.val_dataset else None
 
-    train_sampler = DistributedSampler(train_dataset.dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset.dataset, batch_size=1, sampler=train_sampler, num_workers=0, collate_fn=lambda x: x
-    )
+
+    if is_main:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        print("=" * 60)
+        print(f"Distributed Training started on rank {rank}/{world_size}")
+        print(f"Model logs will be saved to: {log_dir}")
+        print(f"→ Epochs: {args.epochs}")
+        print(f"→ Batch size: {args.batch_size} (per process)")
+        print(f"→ Learning rate: {args.lr}")
+        print(f"→ LR Scheduler: Linear warmup for first 100 steps")
+        print(f"→ Dataset: {'FashionMNIST' if not args.train_dataset else args.train_dataset}")
+        print(f"→ Validation: {'Enabled' if val_loader else 'Disabled'}")
+        print("=" * 60, flush=True)
+        
+    #train_sampler = DistributedSampler(train_dataset.dataset, num_replicas=world_size, rank=rank, shuffle=True)
+    # train_loader = torch.utils.data.DataLoader(
+    #     train_dataset,
+    #     batch_size=1,
+    #     num_workers=0,
+    #     collate_fn=lambda x: x,
+    #     pin_memory=(device == "cuda"),
+    # )
+    train_loader = train_dataset 
 
     train_losses, val_losses = [], []
     best_val_loss = float('inf')
 
     for epoch in range(args.epochs):
-        train_sampler.set_epoch(epoch)
+        # train_sampler.set_epoch(epoch)
         total_loss = 0
         pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"[Epoch {epoch + 1}/{args.epochs}]", dynamic_ncols=True) if is_main else enumerate(train_loader)
 
         for i, batch in pbar:
             model.train()
-            latent, noised_image, added_noise, timesteps, label = stack_tensors(batch)
-            embeddings, pooled_embeddings = prompt_handler(label, clip=clip, clip_2=clip.model_2, t5_encoder=t5_encoder)
+            latent, noised_image, added_noise, timesteps, label, sigma = stack_tensors(batch)
+            # clip_1, clip_2 = clip
+            embeddings, pooled_embeddings = prompt_handler(label, clip=clip_1, clip_2=clip_2, t5_encoder=t5_encoder)
+            # embeddings, pooled_embeddings = prompt_handler(label, clip=clip, clip_2=clip.model_2, t5_encoder=t5_encoder)
             target = added_noise - noised_image
 
             drift = model(latent=latent, timestep=timesteps,
                           encoder_hidden_states=embeddings,
                           pooled_projections=pooled_embeddings)
-            loss = loss_fn(drift, target)
+            loss = loss_fn(drift, target, sigma)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             scheduler.step()
 
-            for layer in model.module.model:
-                if hasattr(layer, "self_attn"):
-                    layer.self_attn.reset_cache()
+            # for layer in model.module.model:
+            #     if hasattr(layer, "self_attn"):
+            #         layer.self_attn.reset_cache()
+            for block in model.module.transformer_blocks:
+                if hasattr(block, "attn") and hasattr(block.attn, "reset_cache"):
+                    block.attn.reset_cache()
+                if hasattr(block, "attn2") and hasattr(block.attn2, "reset_cache"):
+                    block.attn2.reset_cache()
 
             total_loss += loss.item()
             if is_main and args.enable_log:
@@ -143,7 +191,7 @@ def train(args):
                 torch.save(model.module.state_dict(), os.path.join(checkpoint_dir, f"model_epoch{epoch + 1}.pth"))
 
             if val_loader:
-                val_loss = evaluate(model.module, val_loader, clip, clip.model_2, t5_encoder, prompt_handler, device)
+                val_loss = evaluate(model.module, val_loader, clip_1, clip_2, t5_encoder, prompt_handler, device)
                 log_loss_csv(os.path.join(log_dir, "val_log.csv"), epoch + 1, 0, val_loss)
                 val_losses.append(val_loss)
                 print(f"[Epoch {epoch + 1}] Val Loss: {val_loss:.4f}")
@@ -164,7 +212,7 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=0.003)
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--train_dataset", type=str, default=None)
     parser.add_argument("--val_dataset", type=str, default=None)
     parser.add_argument("--enable_log", action="store_true")

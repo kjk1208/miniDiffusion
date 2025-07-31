@@ -1,1 +1,1 @@
-OMP_NUM_THREADS=4 torchrun --nproc-per-node=4 src/ddp_train.py --epochs 20 --enable_log
+OMP_NUM_THREADS=4 torchrun --nproc-per-node=4 src/ddp_train.py --epochs 20 --enable_log --batch_size=2

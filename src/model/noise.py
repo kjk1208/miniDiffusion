@@ -7,46 +7,39 @@ class NoiseScheduler(torch.nn.Module):
                  num_inference_timesteps: int = 50, inference: bool = False):
         super(NoiseScheduler, self).__init__()
 
-        # shift normal dist left or right (mean)
         self.base_shift = base_shift
-        # control shape of logit-normal distrubition (standard deviation)
-        # shift < 1 = decay the noise earlier
         self.shift = shift
-
-        # compute timestep values so we can index into them later
-        timesteps = torch.linspace(1.0, num_training_timesteps, int(num_training_timesteps))
-
-        # normalize between 0 and 1
-        sigmas = timesteps / num_training_timesteps
-
-        # staticaly shift (fixed image size assumed)
-        self.sigmas = sigmas * shift / (1 + (shift - 1) * sigmas)
-
-        # get timesteps after shifting
-        self.timesteps = self.sigmas * num_training_timesteps
-
         self.num_training_timesteps = num_training_timesteps
         self.num_inference_timesteps = num_inference_timesteps
+
+        # 초기 시그마/타임스텝 계산
+        timesteps = torch.linspace(1.0, num_training_timesteps, int(num_training_timesteps))
+        sigmas = timesteps / num_training_timesteps
+        sigmas = sigmas * shift / (1 + (shift - 1) * sigmas)
+        timesteps = sigmas * num_training_timesteps
+
+        # register buffer는 여기서 딱 한 번만
+        self.register_buffer("sigmas", sigmas.clone())     # clone() 중요
+        self.register_buffer("timesteps", timesteps.clone())
 
         self.sigma_min = self.sigmas[-1].item()
         self.sigma_max = self.sigmas[0].item()
 
         if inference:
-
             max_timestep = self.sigma_to_timestep(self.sigma_max)
             min_timestep = self.sigma_to_timestep(self.sigma_min)
 
-            # go from full noise to clean image (descending)
-            timesteps = torch.linspace(max_timestep, min_timestep, num_inference_timesteps)
+            t_inf = torch.linspace(max_timestep, min_timestep, num_inference_timesteps)
+            s_inf = t_inf / num_training_timesteps
+            s_inf = s_inf * shift / (1 + (shift - 1) * s_inf)
+            t_inf = s_inf * num_training_timesteps
 
-            # same as for training
-            sigmas = timesteps / num_training_timesteps
-            sigmas = sigmas * shift / (1 + (shift - 1) * sigmas)
-            timesteps = sigmas * num_training_timesteps
+            s_inf = torch.cat([s_inf.flip(0), torch.zeros(1, device=s_inf.device)])
+            t_inf = t_inf.flip(0)
 
-            # add a zero at the end to reach the data distribution
-            self.sigmas = torch.cat([sigmas.flip(0), torch.zeros(1, device = sigmas.device)])
-            self.timesteps = timesteps.flip(0)
+            # 기존 buffer 값을 업데이트
+            self.sigmas.data = s_inf
+            self.timesteps.data = t_inf
 
         self.step_index = 0
 
@@ -63,60 +56,105 @@ class NoiseScheduler(torch.nn.Module):
             raise ValueError("Can't have a timestep larger than the defined timestep")
 
     
-    def get_sigmas(self, timesteps, n_dim: int = 4):
-        " From the timestep, get the corresponding sigma (noise scale) "
+    # def get_sigmas(self, timesteps, n_dim: int = 4):
+    #     " From the timestep, get the corresponding sigma (noise scale) "
 
-        # use binary search (torch.searchsorted) for finding indices
-        step_indices = [torch.searchsorted(self.timesteps, t).item() for t in timesteps]
+    #     # use binary search (torch.searchsorted) for finding indices
+    #     step_indices = [torch.searchsorted(self.timesteps, t).item() for t in timesteps]
 
-        sigma = self.sigmas[step_indices].flatten()
+    #     sigma = self.sigmas[step_indices].flatten()
         
-        # expand to n_dim dims
+    #     # expand to n_dim dims
+    #     sigma = sigma.view(tuple([sigma.size(0)] + [1] * (n_dim - 1)))
+
+    #     return sigma
+    
+    def get_sigmas(self, timesteps, n_dim: int = 4):
+        device = timesteps[0].device  # 현재 입력 텐서의 디바이스 기준
+        timesteps_tensor = self.timesteps.to(device)
+
+        step_indices = [torch.searchsorted(timesteps_tensor, t).item() for t in timesteps]
+        sigma = self.sigmas[step_indices].flatten().to(device)
+
+        # expand dims
         sigma = sigma.view(tuple([sigma.size(0)] + [1] * (n_dim - 1)))
 
         return sigma
             
-    def sample_logit_timestep(self, batch_size: int = 1, device: str = "cpu") -> float:
-        " Sample timesteps from logit normal distribution "
-        # returns timesteps in range [0, timesteps - 1]
-        # beneficial to train the model on different noise levels
+    # def sample_logit_timestep(self, batch_size: int = 1, device: str = "cpu") -> float:
+    #     " Sample timesteps from logit normal distribution "
+    #     # returns timesteps in range [0, timesteps - 1]
+    #     # beneficial to train the model on different noise levels
 
-        uniform_samples = torch.rand(batch_size, device = device)
-        # turn a uniform sample into a normal sample
-        normal_samples = torch.logit(uniform_samples, eps = 1e-8) * self.shift + self.base_shift
+    #     uniform_samples = torch.rand(batch_size, device = device)
+    #     # turn a uniform sample into a normal sample
+    #     normal_samples = torch.logit(uniform_samples, eps = 1e-8) * self.shift + self.base_shift
 
+    #     sampled_t = torch.sigmoid(normal_samples)
+
+    #     # weighted_sampled_t = (sampled_t * (self.num_training_timesteps - 1)).long() # scale
+    #     weighted_sampled_t = (sampled_t * (self.num_training_timesteps - 1)).floor().long()
+        
+    #     return weighted_sampled_t.item()
+    
+    def sample_logit_timestep(self, batch_size: int = 1, device: str = "cpu") -> int:
+        uniform_samples = torch.rand(batch_size, device=device)
+        normal_samples = torch.logit(uniform_samples, eps=1e-8) * self.shift + self.base_shift
         sampled_t = torch.sigmoid(normal_samples)
-
-        weighted_sampled_t = (sampled_t * (self.num_training_timesteps - 1)).long() # scale
-        
-        return weighted_sampled_t.item()
-        
-
-    def add_noise(self, image: torch.FloatTensor,  timestep: float = None):
-
+        weighted_sampled_t = (sampled_t * (self.num_training_timesteps - 1)).long()
+        weighted_sampled_t = torch.clamp(weighted_sampled_t, max=self.num_training_timesteps - 1)  # clamp
+        return weighted_sampled_t.item() if batch_size == 1 else weighted_sampled_t
+    
+    
+    def add_noise(self, image: torch.FloatTensor, timestep: float = None):
         """
         Forward Process of Diffusion
         Adds noise to the image according to the timestep.
         t = Timestep at which to evaluate the noise schedule.
         """
 
+        device = image.device  # 현재 이미지가 있는 디바이스
+
         if timestep is None:
-            timestep = self.sample_logit_timestep(image.size(0), device = image.device)
+            timestep = self.sample_logit_timestep(image.size(0), device=device)
 
-        self.check_timestep(timestep) 
+        self.check_timestep(timestep)
 
-        # randn_like will create the guassian noise
-        # that will fit the image's dimensions
-        noise = torch.randn_like(image)
+        noise = torch.randn_like(image, device=device)  # 명시적으로 디바이스 지정
 
-        timestep = self.timesteps[timestep]
-        sigma = self.get_sigmas([timestep])
+        timestep_value = self.timesteps[timestep].to(device)  # 이거도 device에 올려야 함
+        sigma = self.get_sigmas([timestep_value.to(device)], n_dim=image.ndim).to(device)  # 디바이스 지정
 
         # noise the images
         noised_image = (1.0 - sigma) * image + noise * sigma
 
-        # returning noise is helpful for training
-        return noised_image, noise, timestep
+        return noised_image, noise, timestep_value, sigma
+
+    # def add_noise(self, image: torch.FloatTensor,  timestep: float = None):
+
+    #     """
+    #     Forward Process of Diffusion
+    #     Adds noise to the image according to the timestep.
+    #     t = Timestep at which to evaluate the noise schedule.
+    #     """
+
+    #     if timestep is None:
+    #         timestep = self.sample_logit_timestep(image.size(0), device = image.device)
+
+    #     self.check_timestep(timestep) 
+
+    #     # randn_like will create the guassian noise
+    #     # that will fit the image's dimensions
+    #     noise = torch.randn_like(image)
+
+    #     timestep = self.timesteps[timestep]
+    #     sigma = self.get_sigmas([timestep])
+
+    #     # noise the images
+    #     noised_image = (1.0 - sigma) * image + noise * sigma
+
+    #     # returning noise is helpful for training
+    #     return noised_image, noise, timestep
     
     @torch.no_grad()
     def reverse_flow(self, current_sample: torch.Tensor, model_output: torch.FloatTensor, stochasticity: bool):

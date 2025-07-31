@@ -167,11 +167,11 @@ class DiT(nn.Module):
             Input: Noised Latent, Specific Timestep, Pooled Text Projections, Encoded Text Embeddings
             Output: Velocity vector
         """
-
+        
         height, width = latent.shape[-2:]
         hidden_states = self.pos_embed(latent)
 
-        encoder_hidden_states = self.context_embedder(encoder_hidden_states)
+        encoder_hidden_states = self.context_embedder(encoder_hidden_states.float())
         time_embeddings = self.time_text_embed(timestep, pooled_projections)
 
         # pass attention mask for every layer

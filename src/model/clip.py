@@ -109,7 +109,8 @@ class CLIPAttention(nn.Module):
         if attention_mask.dim() == 1:
             attention_mask = attention_mask.unsqueeze(0)
 
-        attention_mask = attention_mask + causal_attention_mask
+        attention_mask = attention_mask[:, None, None, :]  # [B, 1, 1, L]
+        attention_mask = attention_mask + causal_attention_mask  # [B, 1, L, L]
 
         attn_weights = torch.matmul(query, key.transpose(-1, -2)) * self.scale
         attn_weights = attn_weights + attention_mask
@@ -202,14 +203,28 @@ class CLIP(nn.Module):
     def forward(self):
         pass
     
-    def encode_text(self, input_ids, attention_mask = None):
-        """ Tokenize (if needed) and encode texts, returning embeddings and mask. Function for ConditionalPromptNorm """
-        
-        # tokenize strings if raw text passed
-        if attention_mask is None:
-            input_ids, attention_mask = self.tokenizer.tokenize_batch([input_ids])
+    def encode_text(self, texts, attention_mask=None, device=None):
+        """
+        Args:
+            texts (Union[str, List[str]]): The input prompt(s) as raw text.
+        Returns:
+            Tuple[Tensor, Tensor]: (pooled_embedding, hidden_states)
+        """
 
-        # ensure batch dim
+        # string이면 list로 변환
+        if isinstance(texts, str):
+            texts = [texts]
+        elif isinstance(texts, torch.Tensor):
+            raise ValueError(f"`encode_text()` expected string or list of strings, but got Tensor")
+
+        if attention_mask is None:
+            input_ids, attention_mask = self.tokenizer.tokenize_batch(texts)
+
+        if device is not None:
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
+
+        # ensure batch dimension
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)
 
@@ -217,7 +232,6 @@ class CLIP(nn.Module):
             pooled_emb, pentlum = self.text_model(input_ids.long(), attention_mask)
 
         pooled_emb = self.text_projection(pooled_emb)
-
         pooled_emb = F.normalize(pooled_emb, dim=-1)
 
         return pooled_emb, pentlum

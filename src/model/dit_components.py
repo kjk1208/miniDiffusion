@@ -5,6 +5,8 @@ from torch import Tensor
 import torch.nn.functional as F
 from model.clip import CLIP, OpenCLIP
 from model.tokenizer import TorchTokenizer, UnigramTokenizer
+from torch.nn.utils.rnn import pad_sequence
+import torch.distributed as dist
 
 class HandlePrompt(nn.Module):
     def __init__(self):
@@ -13,25 +15,40 @@ class HandlePrompt(nn.Module):
         self.clip_tokenizer = TorchTokenizer()
         self.t5_tokenizer = UnigramTokenizer()
     
-    def forward(self, x: str, clip: CLIP, clip_2: OpenCLIP, t5_encoder):
+    def forward(self, x, clip: CLIP, clip_2: OpenCLIP, t5_encoder):
+        # 리스트가 아니면 리스트로 변환
+        if isinstance(x, str):
+            x = [x]
 
-        clip_tokens = self.clip_tokenizer.tokenize(x)
-        t5_tokens = self.t5_tokenizer.encode(x)
+        # tokenizer는 clip 내부에서 처리하도록 함
+        device = next(clip.parameters()).device
+        
+        with torch.no_grad():
+            pooled, clip_embeds = clip.encode_text(x, device=device)
+            pooled2, clip_2_embeds = clip_2.encode_text(x, device=device)
 
-        pooled, clip_embeds = clip.encode_text(clip_tokens)
-        pooled2, clip_2_embeds = clip_2.encode_text(clip_tokens)
+            # T5 tokenizer는 여전히 여기서 처리
+            t5_tokens = [self.t5_tokenizer.encode_ids(t) for t in x]
+            t5_tokens = pad_sequence(t5_tokens, batch_first=True, padding_value=0).to(pooled.device)
 
-        t5_embeds = t5_encoder(t5_tokens)
+            # t5_embeds = t5_encoder(t5_tokens)  # shape: (B, L, C)
+            attn_mask = (t5_tokens != 0).long()
+            t5_embeds = t5_encoder(t5_tokens, attn_mask)  # shape: (B, L, C)
+        # print(f"[RANK {dist.get_rank()}] pooled: {pooled.shape}, clip_embeds: {clip_embeds.shape}")
+        # print(f"[RANK {dist.get_rank()}] t5_embeds: {t5_embeds.shape}")
 
-        clip_embeddings = torch.cat([clip_embeds, clip_2_embeds], dim = -1)
+        # concat CLIP + OpenCLIP
+        clip_embeddings = torch.cat([clip_embeds, clip_2_embeds], dim=-1)  # (B, C+C)
 
-        # get the difference between t5 and clip embeddings and pad it for it to become a matrix
-        clip_embeddings = F.pad(
-            clip_embeddings, (0, t5_embeds.size(-1) - clip_embeddings.size(-1))
-        )
+        # Pad or truncate to match T5 output embedding dimension
+        if clip_embeddings.size(-1) < t5_embeds.size(-1):
+            clip_embeddings = F.pad(clip_embeddings, (0, t5_embeds.size(-1) - clip_embeddings.size(-1)))
+        elif clip_embeddings.size(-1) > t5_embeds.size(-1):
+            clip_embeddings = clip_embeddings[..., :t5_embeds.size(-1)]
 
-        embeddings = torch.cat([clip_embeddings, t5_embeds], dim = -2)
-        pooled_embeddings = torch.cat([pooled, pooled2], dim = -1)
+        # No unsqueeze needed (already shape [B, L, C])
+        embeddings = torch.cat([clip_embeddings, t5_embeds], dim=1)  # (B, L+L, C)
+        pooled_embeddings = torch.cat([pooled, pooled2], dim=-1)  # (B, C+C)
 
         return embeddings, pooled_embeddings
     
@@ -173,6 +190,9 @@ class PatchEmbed(nn.Module):
         self.register_buffer("pos_embed", pos_embed.unsqueeze(0).float(), persistent = True)
 
     def forward(self, x):
+        if x.ndim == 5 and x.shape[1] == 1:
+            x = x.squeeze(1)  # [B, 1, C, H, W] → [B, C, H, W]
+        x = x.to(self.proj.weight.dtype)  # 입력 tensor와 conv의 weight dtype 일치시킴
         
         height, width = x.shape[-2:]
         x = self.proj(x)
@@ -270,7 +290,7 @@ def get_timestep_embeddings(timesteps: Tensor, embed_dim: int = 256, max_period:
     emb = torch.exp(exponent)
 
     # multiply the exponents with the timesteps
-    emb = timesteps[:, None].float() * emb[None, :]  # to do matrix mat
+    emb = timesteps[:, None].float() * emb[None, :].to(timesteps.device)  # to do matrix mat
 
     #concat sin and cos embeddings
     emb = torch.cat([torch.cos(emb), torch.sin(emb)], dim = -1)
@@ -299,8 +319,11 @@ class CombinedTimestepTextProjEmbeddings(nn.Module):
         self.text_embedder = PixArtAlphaTextProjection()
 
     def forward(self, timestep, pooled_projection: Tensor) -> Tensor:
+        pooled_projection = pooled_projection.to(dtype=torch.float32)
         timesteps_proj = self.time_proj(timestep)
-        timesteps_emb = self.timestep_embedder(timesteps_proj.to(dtype=pooled_projection.dtype))  # (N, D)
+        timesteps_emb = self.timestep_embedder(
+            timesteps_proj.to(device=pooled_projection.device, dtype=pooled_projection.dtype)
+        )
 
         pooled_projections = self.text_embedder(pooled_projection)
 
